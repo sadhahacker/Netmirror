@@ -1,21 +1,21 @@
 const PROVIDERS = {
   netflix: {
     id: 'netflix',
-    name: 'Netflix Mirror',
+    name: 'Netflix',
     pathPrefix: '',
     ott: 'nf',
     studio: null,
   },
   prime: {
     id: 'prime',
-    name: 'Prime Video Mirror',
+    name: 'Prime Video',
     pathPrefix: 'pv/',
     ott: 'pv',
     studio: null,
   },
   hotstar: {
     id: 'hotstar',
-    name: 'Hotstar Mirror',
+    name: 'Hotstar',
     pathPrefix: 'hs/',
     ott: 'hs',
     studio: null,

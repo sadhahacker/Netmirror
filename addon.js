@@ -26,7 +26,7 @@ const manifest = {
 };
 
 const builder = new addonBuilder(manifest);
-const PROVIDER_IDS = Object.keys(PROVIDERS);
+const PROVIDER_IDS = Object.keys(PROVIDERS).filter(pid => !['marvel', 'starwars', 'pixar'].includes(pid));
 
 function parseId(id) {
   const parts = id.split(':');
@@ -56,25 +56,47 @@ function normalizeTitle(title) {
     .trim();
 }
 
-function pickSearchMatch(results, title) {
+function pickSearchMatch(results, title, type) {
   const wanted = normalizeTitle(title);
   if (!wanted) return null;
 
-  return results.find(r => normalizeTitle(r.t) === wanted)
-    || results.find(r => {
+  // Filter based on requested type to avoid movie/series mismatches
+  const filtered = results.filter(r => {
+    const isSeries = r.r === 'Series';
+    if (type === 'series') return isSeries;
+    if (type === 'movie') return !isSeries;
+    return true;
+  });
+
+  const candidates = filtered.length > 0 ? filtered : results;
+
+  return candidates.find(r => normalizeTitle(r.t) === wanted)
+    || candidates.find(r => {
       const candidate = normalizeTitle(r.t);
       return candidate.includes(wanted) || wanted.includes(candidate);
     })
     || null;
 }
 
+const cinemetaCache = new Map();
+const CINEMETA_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
 async function getTitleFromImdb(type, imdbId) {
+  const cached = cinemetaCache.get(imdbId);
+  if (cached && Date.now() - cached.ts < CINEMETA_TTL) {
+    return cached.title;
+  }
+
   try {
     const res = await axios.get(
       `https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`,
       { timeout: 8000 }
     );
-    return res.data?.meta?.name || null;
+    const title = res.data?.meta?.name || null;
+    if (title) {
+      cinemetaCache.set(imdbId, { title, ts: Date.now() });
+    }
+    return title;
   } catch (e) {
     return null;
   }
@@ -122,17 +144,22 @@ function buildStreams(items, cfgName) {
           id: `sub_${t.label}`
         };
       });
-    for (const src of (item.sources || [])) {
-      const rawUrl = fullStreamUrl(src.file);
-      if (!rawUrl) continue;
-      const quality = src.label || 'Stream';
-      const streamLabel = `${cfgName} · ${quality}`;
-      streams.push({
-        url: makeProxyUrl(rawUrl),
-        title: streamLabel,
-        subtitles,
-      });
-    }
+
+    const sources = item.sources || [];
+    if (sources.length === 0) continue;
+
+    // Find the master playlist (usually labeled 'Auto')
+    const masterSrc = sources.find(src => String(src.label || '').toLowerCase() === 'auto') || sources[0];
+
+    const rawUrl = fullStreamUrl(masterSrc.file);
+    if (!rawUrl) continue;
+
+    const streamLabel = cfgName;
+    streams.push({
+      url: makeProxyUrl(rawUrl),
+      title: streamLabel,
+      subtitles,
+    });
   }
 
   return streams;
@@ -165,16 +192,14 @@ async function collectEpisodes(post, seriesId, cfg) {
 }
 
 async function streamsForTitle(title, type, opts = {}) {
-  const streams = [];
-
-  for (const pid of PROVIDER_IDS) {
+  const promises = PROVIDER_IDS.map(async (pid) => {
     try {
       const cfg = PROVIDERS[pid];
       const data = await searchContent(title, cfg);
       const results = data?.searchResult || [];
-      const match = pickSearchMatch(results, title);
+      const match = pickSearchMatch(results, title, type);
 
-      if (!match) continue;
+      if (!match) return [];
 
       let playlistId = match.id;
       let playlistTitle = match.t;
@@ -186,17 +211,23 @@ async function streamsForTitle(title, type, opts = {}) {
           parseSeason(ep.s) === opts.season && parseEp(ep.ep) === opts.episode
         );
 
-        if (!episode) continue;
+        if (!episode) return [];
         playlistId = episode.id;
         playlistTitle = episode.t || match.t;
       }
 
       const pl = await getPlaylist(playlistId, playlistTitle, cfg);
       const items = Array.isArray(pl) ? pl : [pl];
-      const found = buildStreams(items, cfg.name);
-      streams.push(...found);
+      return buildStreams(items, cfg.name);
     } catch (e) {
+      return [];
     }
+  });
+
+  const results = await Promise.all(promises);
+  const streams = [];
+  for (const list of results) {
+    streams.push(...list);
   }
 
   return streams;
